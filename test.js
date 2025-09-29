@@ -9,6 +9,7 @@ console.log('1. Environment Variables:');
 console.log(`   LIMITLESS_API_KEY: ${process.env.LIMITLESS_API_KEY ? '✅ Set' : '❌ Missing'}`);
 console.log(`   OPENAI_API_KEY: ${process.env.OPENAI_API_KEY ? '✅ Set' : '❌ Missing'}`);
 console.log(`   WEBHOOK_URL: ${process.env.WEBHOOK_URL ? '✅ Set' : '❌ Missing'}`);
+console.log(`   WEBHOOK_URL_2: ${process.env.WEBHOOK_URL_2 ? '✅ Set' : '❌ Missing (optional)'}`);
 console.log(`   POLL_SECONDS: ${process.env.POLL_SECONDS || '120 (default)'}`);
 console.log(`   DB_PATH: ${process.env.DB_PATH || './starred.db (default)'}\n`);
 

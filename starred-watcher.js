@@ -8,6 +8,7 @@ import 'dotenv/config';
 const LIMITLESS_API_KEY = process.env.LIMITLESS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const WEBHOOK_URL_2 = process.env.WEBHOOK_URL_2;
 const DB_PATH = process.env.DB_PATH || './starred.db';
 const TIMEZONE = process.env.TIMEZONE || 'America/Chicago';
 const POLL_SECONDS = Number(process.env.POLL_SECONDS || 120);
@@ -182,8 +183,43 @@ Return strict JSON with: sentiment ("positive"|"neutral"|"negative"), confidence
   try { return JSON.parse(text); } catch { return { sentiment: "neutral", confidence: 0.5, summary: text.slice(0,120) }; }
 }
 
+async function createChatGPTSummary(summary, markdownPreview) {
+  if (!OPENAI_API_KEY || !WEBHOOK_URL_2) return null;
+  
+  const sys = `You are a concise summarizer. Create a brief, informative summary that combines the key insights from both the analysis summary and the content preview. Keep it under 100 words and focus on the most important points.`;
+  
+  const body = {
+    model: OPENAI_MODEL,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: `Summarize this content:\n\nAnalysis Summary: ${summary || 'No summary available'}\n\nContent Preview: ${markdownPreview || 'No content preview available'}` }
+    ],
+    temperature: 0.3
+  };
+  
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) throw new Error(`OpenAI ${r.status}`);
+    const j = await r.json();
+    return j.choices?.[0]?.message?.content?.trim() || null;
+  } catch (e) {
+    console.warn('ChatGPT summary failed:', e.message);
+    return null;
+  }
+}
+
 async function postWebhook(payload) {
   const r = await fetch(WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  return r.status;
+}
+
+async function postWebhook2(payload) {
+  if (!WEBHOOK_URL_2) return null;
+  const r = await fetch(WEBHOOK_URL_2, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   return r.status;
 }
 
@@ -244,6 +280,29 @@ async function fullBackfill() {
             analysis,
             markdownPreview: clip(c2.markdown, 4000)
           });
+          
+          // Send second webhook with ChatGPT summary if configured
+          if (WEBHOOK_URL_2 && analysis?.summary) {
+            try {
+              const chatGPTSummary = await createChatGPTSummary(analysis.summary, clip(c2.markdown, 4000));
+              if (chatGPTSummary) {
+                await postWebhook2({
+                  source: 'limitless-starred-summary',
+                  lifelogId: c2.id,
+                  title: c2.title,
+                  startTime: c2.startTime,
+                  endTime: c2.endTime,
+                  updatedAt: c2.updatedAt,
+                  isStarred: !!c2.isStarred,
+                  chatGPTSummary,
+                  originalAnalysis: analysis
+                });
+              }
+            } catch (e) {
+              console.warn('Second webhook failed for', c2.id, e.message);
+            }
+          }
+          
           await markWebhook(c2.updatedAt, status, c2.id);
           webhookSent++;
         }
@@ -294,6 +353,29 @@ async function incrementalScan() {
           analysis,
           markdownPreview: clip(c2.markdown, 4000)
         });
+        
+        // Send second webhook with ChatGPT summary if configured
+        if (WEBHOOK_URL_2 && analysis?.summary) {
+          try {
+            const chatGPTSummary = await createChatGPTSummary(analysis.summary, clip(c2.markdown, 4000));
+            if (chatGPTSummary) {
+              await postWebhook2({
+                source: 'limitless-starred-summary',
+                lifelogId: c2.id,
+                title: c2.title,
+                startTime: c2.startTime,
+                endTime: c2.endTime,
+                updatedAt: c2.updatedAt,
+                isStarred: !!c2.isStarred,
+                chatGPTSummary,
+                originalAnalysis: analysis
+              });
+            }
+          } catch (e) {
+            console.warn('Second webhook failed for', c2.id, e.message);
+          }
+        }
+        
         await markWebhook(c2.updatedAt, status, c2.id);
         sent++;
       }
