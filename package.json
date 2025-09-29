@@ -9,7 +9,7 @@
     "test": "node test.js"
   },
   "dependencies": {
-    "better-sqlite3": "^9.4.0",
+    "sqlite3": "^5.1.6",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {

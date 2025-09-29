@@ -2,7 +2,7 @@
 // Node 18+ (uses global fetch). Stores starred Lifelogs in SQLite and posts a webhook for each new/updated star.
 // ESM module: set "type":"module" in package.json.
 
-import Database from 'better-sqlite3';
+import sqlite3 from 'sqlite3';
 import 'dotenv/config';
 
 const LIMITLESS_API_KEY = process.env.LIMITLESS_API_KEY;
@@ -20,56 +20,111 @@ if (!WEBHOOK_URL) { console.error('Missing WEBHOOK_URL'); process.exit(1); }
 if (!OPENAI_API_KEY) { console.warn('OPENAI_API_KEY missing → sentiment will be "unscored".'); }
 
 // ---------- SQLite ----------
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.exec(`
-CREATE TABLE IF NOT EXISTS lifelogs (
-  id TEXT PRIMARY KEY,
-  title TEXT,
-  markdown TEXT,
-  startTime TEXT,
-  endTime TEXT,
-  updatedAt TEXT,
-  isStarred INTEGER,
-  analysis_json TEXT,
-  webhook_last_updatedAt TEXT,
-  webhook_status INTEGER,
-  webhook_sent_at TEXT,
-  inserted_at TEXT DEFAULT (datetime('now')),
-  last_seen_at TEXT DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_lifelogs_updatedAt ON lifelogs(updatedAt);
-CREATE INDEX IF NOT EXISTS idx_lifelogs_last_seen ON lifelogs(last_seen_at);
+const db = new sqlite3.Database(DB_PATH);
 
-CREATE TABLE IF NOT EXISTS kv (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
-`);
+// Initialize database schema
+db.serialize(() => {
+  db.run(`PRAGMA journal_mode = WAL`);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS lifelogs (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      markdown TEXT,
+      startTime TEXT,
+      endTime TEXT,
+      updatedAt TEXT,
+      isStarred INTEGER,
+      analysis_json TEXT,
+      webhook_last_updatedAt TEXT,
+      webhook_status INTEGER,
+      webhook_sent_at TEXT,
+      inserted_at TEXT DEFAULT (datetime('now')),
+      last_seen_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_lifelogs_updatedAt ON lifelogs(updatedAt);`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_lifelogs_last_seen ON lifelogs(last_seen_at);`);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS kv (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
+});
 
-const kvGet = db.prepare(`SELECT value FROM kv WHERE key = ?`);
-const kvSet = db.prepare(`INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`);
+// Helper functions for database operations
+function kvGet(key) {
+  return new Promise((resolve, reject) => {
+    db.get(`SELECT value FROM kv WHERE key = ?`, [key], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
 
-const upsertLifelog = db.prepare(`
-INSERT INTO lifelogs (id, title, markdown, startTime, endTime, updatedAt, isStarred, analysis_json, webhook_last_updatedAt, webhook_status, webhook_sent_at, last_seen_at)
-VALUES (@id, @title, @markdown, @startTime, @endTime, @updatedAt, @isStarred, @analysis_json, @webhook_last_updatedAt, @webhook_status, @webhook_sent_at, datetime('now'))
-ON CONFLICT(id) DO UPDATE SET
-  title=excluded.title,
-  markdown=excluded.markdown,
-  startTime=excluded.startTime,
-  endTime=excluded.endTime,
-  updatedAt=excluded.updatedAt,
-  isStarred=excluded.isStarred,
-  analysis_json=COALESCE(excluded.analysis_json, lifelogs.analysis_json),
-  webhook_last_updatedAt=COALESCE(excluded.webhook_last_updatedAt, lifelogs.webhook_last_updatedAt),
-  webhook_status=COALESCE(excluded.webhook_status, lifelogs.webhook_status),
-  webhook_sent_at=COALESCE(excluded.webhook_sent_at, lifelogs.webhook_sent_at),
-  last_seen_at=datetime('now');
-`);
+function kvSet(key, value) {
+  return new Promise((resolve, reject) => {
+    db.run(`INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [key, value], (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
 
-const findById = db.prepare(`SELECT * FROM lifelogs WHERE id=?`);
-const markWebhook = db.prepare(`UPDATE lifelogs SET webhook_last_updatedAt=?, webhook_status=?, webhook_sent_at=datetime('now') WHERE id=?`);
-const setAnalysis = db.prepare(`UPDATE lifelogs SET analysis_json=? WHERE id=?`);
+function upsertLifelog(row) {
+  return new Promise((resolve, reject) => {
+    const stmt = `
+      INSERT INTO lifelogs (id, title, markdown, startTime, endTime, updatedAt, isStarred, analysis_json, webhook_last_updatedAt, webhook_status, webhook_sent_at, last_seen_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        title=excluded.title,
+        markdown=excluded.markdown,
+        startTime=excluded.startTime,
+        endTime=excluded.endTime,
+        updatedAt=excluded.updatedAt,
+        isStarred=excluded.isStarred,
+        analysis_json=COALESCE(excluded.analysis_json, lifelogs.analysis_json),
+        webhook_last_updatedAt=COALESCE(excluded.webhook_last_updatedAt, lifelogs.webhook_last_updatedAt),
+        webhook_status=COALESCE(excluded.webhook_status, lifelogs.webhook_status),
+        webhook_sent_at=COALESCE(excluded.webhook_sent_at, lifelogs.webhook_sent_at),
+        last_seen_at=datetime('now');
+    `;
+    db.run(stmt, [
+      row.id, row.title, row.markdown, row.startTime, row.endTime, row.updatedAt, 
+      row.isStarred, row.analysis_json, row.webhook_last_updatedAt, row.webhook_status, row.webhook_sent_at
+    ], (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+function findById(id) {
+  return new Promise((resolve, reject) => {
+    db.get(`SELECT * FROM lifelogs WHERE id=?`, [id], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+function markWebhook(updatedAt, status, id) {
+  return new Promise((resolve, reject) => {
+    db.run(`UPDATE lifelogs SET webhook_last_updatedAt=?, webhook_status=?, webhook_sent_at=datetime('now') WHERE id=?`, [updatedAt, status, id], (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+function setAnalysis(analysisJson, id) {
+  return new Promise((resolve, reject) => {
+    db.run(`UPDATE lifelogs SET analysis_json=? WHERE id=?`, [analysisJson, id], (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
 
 // ---------- Helpers ----------
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -159,21 +214,23 @@ async function fullBackfill() {
     cursor = nextCursor;
     total += lifelogs.length;
     for (const l of lifelogs) {
-      const existing = findById.get(l.id);
+      const existing = await findById(l.id);
       const row = lifelogToRow(l);
-      if (!existing) { upsertLifelog.run(row); inserted++; }
+      if (!existing) { await upsertLifelog(row); inserted++; }
       else {
-        if (existing.updatedAt !== l.updatedAt || existing.isStarred !== (l.isStarred?1:0)) { upsertLifelog.run(row); updated++; }
-        else { db.prepare(`UPDATE lifelogs SET last_seen_at=datetime('now') WHERE id=?`).run(l.id); }
+        if (existing.updatedAt !== l.updatedAt || existing.isStarred !== (l.isStarred?1:0)) { await upsertLifelog(row); updated++; }
+        else { 
+          await db.run(`UPDATE lifelogs SET last_seen_at=datetime('now') WHERE id=?`, [l.id]);
+        }
       }
       // sentiment if missing
-      const current = findById.get(l.id);
+      const current = await findById(l.id);
       if (!current.analysis_json) {
-        try { const analysis = await callOpenAI(current.markdown || ''); setAnalysis.run(JSON.stringify(analysis), l.id); }
+        try { const analysis = await callOpenAI(current.markdown || ''); await setAnalysis(JSON.stringify(analysis), l.id); }
         catch (e) { console.warn('OpenAI sentiment failed for', l.id, e.message); }
       }
       if (BACKFILL_SEND_WEBHOOK) {
-        const c2 = findById.get(l.id);
+        const c2 = await findById(l.id);
         if (c2.webhook_last_updatedAt !== c2.updatedAt) {
           const analysis = c2.analysis_json ? JSON.parse(c2.analysis_json) : null;
           const status = await postWebhook({
@@ -187,7 +244,7 @@ async function fullBackfill() {
             analysis,
             markdownPreview: clip(c2.markdown, 4000)
           });
-          markWebhook.run(c2.updatedAt, status, c2.id);
+          await markWebhook(c2.updatedAt, status, c2.id);
           webhookSent++;
         }
       }
@@ -195,7 +252,7 @@ async function fullBackfill() {
     console.log(`Backfill page ${pages} — got ${lifelogs.length}${cursor ? '' : ' (last page)'}…`);
   } while (cursor && pages < 1000);
   console.log(`Backfill done. pages=${pages}, total=${total}, inserted=${inserted}, updated=${updated}, webhookSent=${webhookSent}`);
-  kvSet.run('backfill_done', '1');
+  await kvSet('backfill_done', '1');
 }
 
 async function incrementalScan() {
@@ -209,19 +266,21 @@ async function incrementalScan() {
     if (!lifelogs.length) break;
 
     for (const l of lifelogs) {
-      const existing = findById.get(l.id);
+      const existing = await findById(l.id);
       const row = lifelogToRow(l);
-      if (!existing) upsertLifelog.run(row);
-      else if (existing.updatedAt !== l.updatedAt || existing.isStarred !== (l.isStarred?1:0)) upsertLifelog.run(row);
-      else db.prepare(`UPDATE lifelogs SET last_seen_at=datetime('now') WHERE id=?`).run(l.id);
+      if (!existing) await upsertLifelog(row);
+      else if (existing.updatedAt !== l.updatedAt || existing.isStarred !== (l.isStarred?1:0)) await upsertLifelog(row);
+      else {
+        await db.run(`UPDATE lifelogs SET last_seen_at=datetime('now') WHERE id=?`, [l.id]);
+      }
 
-      const current = findById.get(l.id);
+      const current = await findById(l.id);
       if (!current.analysis_json) {
-        try { const analysis = await callOpenAI(current.markdown || ''); setAnalysis.run(JSON.stringify(analysis), l.id); }
+        try { const analysis = await callOpenAI(current.markdown || ''); await setAnalysis(JSON.stringify(analysis), l.id); }
         catch (e) { console.warn('OpenAI sentiment failed for', l.id, e.message); }
       }
 
-      const c2 = findById.get(l.id);
+      const c2 = await findById(l.id);
       if (c2.webhook_last_updatedAt !== c2.updatedAt) {
         const analysis = c2.analysis_json ? JSON.parse(c2.analysis_json) : null;
         const status = await postWebhook({
@@ -235,7 +294,7 @@ async function incrementalScan() {
           analysis,
           markdownPreview: clip(c2.markdown, 4000)
         });
-        markWebhook.run(c2.updatedAt, status, c2.id);
+        await markWebhook(c2.updatedAt, status, c2.id);
         sent++;
       }
       processed++;
@@ -243,11 +302,12 @@ async function incrementalScan() {
 
     // Early-stop heuristic after a few pages if 80% are already up-to-date & webhooked
     if (pages >= 3) {
-      const upToDate = lifelogs.filter(l => {
-        const r = findById.get(l.id);
+      const upToDate = await Promise.all(lifelogs.map(async l => {
+        const r = await findById(l.id);
         return r && r.updatedAt === l.updatedAt && r.webhook_last_updatedAt === r.updatedAt && r.analysis_json;
-      }).length;
-      if (upToDate / lifelogs.length >= 0.8) break;
+      }));
+      const upToDateCount = upToDate.filter(Boolean).length;
+      if (upToDateCount / lifelogs.length >= 0.8) break;
     }
     if (!cursor) break;
   }
@@ -255,8 +315,8 @@ async function incrementalScan() {
 }
 
 async function main() {
-  const backfilled = kvGet.get('backfill_done')?.value === '1';
-  if (!backfilled) await fullBackfill();
+  const backfilled = await kvGet('backfill_done');
+  if (!backfilled || backfilled.value !== '1') await fullBackfill();
   if (POLL_SECONDS <= 0) { await incrementalScan(); return; }
   console.log('Watching starred lifelogs… every', POLL_SECONDS, 'seconds');
   await incrementalScan();

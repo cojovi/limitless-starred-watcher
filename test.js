@@ -1,5 +1,5 @@
 // test.js - Simple test to verify environment and dependencies
-import Database from 'better-sqlite3';
+import sqlite3 from 'sqlite3';
 import 'dotenv/config';
 
 console.log('🧪 Testing Limitless Starred Watcher Setup...\n');
@@ -15,14 +15,18 @@ console.log(`   DB_PATH: ${process.env.DB_PATH || './starred.db (default)'}\n`);
 // Test 2: Database connection
 console.log('2. Database Connection:');
 try {
-  const db = new Database(process.env.DB_PATH || './starred.db');
+  const db = new sqlite3.Database(process.env.DB_PATH || './starred.db');
   console.log('   ✅ SQLite database connected successfully');
   
   // Test schema
-  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
-  console.log(`   ✅ Found ${tables.length} tables: ${tables.map(t => t.name).join(', ')}`);
-  
-  db.close();
+  db.all("SELECT name FROM sqlite_master WHERE type='table'", (err, tables) => {
+    if (err) {
+      console.log(`   ❌ Database error: ${err.message}`);
+    } else {
+      console.log(`   ✅ Found ${tables.length} tables: ${tables.map(t => t.name).join(', ')}`);
+    }
+    db.close();
+  });
 } catch (error) {
   console.log(`   ❌ Database error: ${error.message}`);
 }
